@@ -14,20 +14,17 @@ E-ink todo list for the **XTeInk X4**, managed from a simple web UI.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         PHP server                               │
-│  ┌──────────────┐     ┌──────────────────┐   ┌───────────────┐ │
-│  │  index.php   │────▶│   todos.php      │──▶│ data/todos.json│ │
-│  │  (web UI)    │     │   (CRUD API)     │   │  (storage)     │ │
-│  └──────────────┘     └─────────┬────────┘   └───────────────┘ │
-│                                 │                                │
-└─────────────────────────────────┼────────────────────────────────┘
-                                  │ HTTPS GET
-┌─────────────────────────────────┴────────────────────────────────┐
-│                       XTeInk X4                                   │
-│  Buttons ──▶ ESP32-C3 + WiFi ──▶ E-ink display (TODO list)       │
-└──────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  subgraph server["PHP server"]
+    direction LR
+    ui["index.php<br/>(web UI)"] --> api["todos.php<br/>(CRUD API)"]
+    api --> store["data/todos.json<br/>(storage)"]
+  end
+
+  device["XTeInk X4<br/>Buttons → ESP32-C3 + WiFi → E-ink display"]
+
+  api -->|"HTTPS GET"| device
 ```
 
 ## Setup
