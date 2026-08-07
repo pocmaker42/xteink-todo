@@ -2,6 +2,8 @@
 
 E-ink todo list for the **XTeInk X4**, managed from a simple web UI.
 
+![Web UI and e-ink preview](docs/screenshot.png)
+
 ## Features
 
 - **Web UI** to add / check / edit / delete tasks
@@ -119,6 +121,7 @@ Demo mode (screenshots): `index.php?demo=1`
 
 ```
 xteink-todo/
+├── docs/screenshot.png
 ├── firmware/
 │   ├── include/secrets.h.example
 │   ├── platformio.ini
