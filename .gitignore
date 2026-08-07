@@ -1,0 +1,26 @@
+# PlatformIO
+firmware/.pio/
+firmware/.vscode/
+firmware/lib/
+
+# Secrets / config locale (ne jamais committer)
+firmware/include/secrets.h
+server/config.php
+
+# Données runtime
+server/data/todos.json
+server/data/*.json
+!server/data/.gitkeep
+!server/data/todos.example.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS / IDE
+.DS_Store
+*.swp
+.idea/
+*.code-workspace
