@@ -24,12 +24,16 @@ flowchart TB
 
   device["XTeInk X4<br/>Buttons → ESP32-C3 + WiFi → E-ink display"]
 
-  api -->|"HTTPS GET"| device
+  device -->|"HTTPS GET"| api
 ```
 
 ## Setup
 
 ### 1. Prerequisites
+
+- Git
+- Python 3 with PlatformIO
+- A PHP 7.4+ web server with HTTPS
 
 ```bash
 pip3 install platformio
@@ -60,11 +64,20 @@ cp server/config.example.php server/config.php
 ```php
 return [
     'base_url' => 'https://example.com/xteink',
-    'api_token' => '', // e.g. 'change-me' to protect the API
+    'api_token' => '', // empty = authentication disabled
 ];
 ```
 
 > `secrets.h`, `config.php`, and `data/todos.json` are gitignored.
+
+For authenticated access, generate a long random token and configure the same
+value in `server/config.php` and `firmware/include/secrets.h`. Do not use the
+example strings from this README as real credentials.
+
+The token is shared with the web UI and is therefore visible to anyone who can
+open that UI. It protects the API from unauthenticated requests, but it is not a
+replacement for user accounts or web-server access control. Use HTTPS and
+restrict access to the UI when necessary.
 
 ### 3. Deploy the server
 
@@ -76,15 +89,21 @@ Upload the `server/` folder to your PHP host:
 - writable `data/` folder
 
 ```bash
+cd server
+mkdir -p data
 chmod 775 data
-chmod 666 data/todos.json   # once created
 ```
 
+The PHP process must be able to write to `data/`; the exact owner and group
+depend on your hosting environment. The application creates `todos.json`
+automatically. Avoid world-writable permissions such as `chmod 666`.
+
 API smoke test:
+
 ```bash
 curl https://example.com/xteink/todos.php
 # with token:
-curl -H "X-Api-Token: change-me" https://example.com/xteink/todos.php
+curl -H "X-Api-Token: YOUR_RANDOM_TOKEN" https://example.com/xteink/todos.php
 ```
 
 ### 4. Flash the firmware
@@ -153,8 +172,23 @@ xteink-todo/
 - `{ "action": "clear_done" }`
 - `{ "action": "reorder", "ids": ["…","…"] }`
 
-Optional auth: `X-Api-Token` header or `?token=…` query param.
+Optional auth: send the shared token in the `X-Api-Token` header. A `?token=…`
+query parameter is also supported for compatibility, but is discouraged because
+URLs can be stored in browser history, server logs, and intermediary logs.
+
+Leaving `api_token` empty disables authentication and makes the API publicly
+accessible to anyone who can reach its URL.
+
+## Troubleshooting
+
+| Problem | What to check |
+|---------|---------------|
+| API reports that it cannot write `todos.json` | Check the owner and group of `server/data/` and make sure the PHP process can write to it. |
+| Web UI returns `Unauthorized` | Confirm that `server/config.php` contains the expected token and that the UI is loaded from the same deployment. |
+| Device shows `API error` | Check `API_TODOS`, HTTPS availability, and that the firmware token matches the server token. |
+| Device cannot connect to Wi-Fi | Recheck `WIFI_SSID` and `WIFI_PASSWORD`, then use the serial monitor for connection messages. |
+| PlatformIO cannot find the device | Run `pio device list`, reconnect the USB cable, and verify the selected upload port. |
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
