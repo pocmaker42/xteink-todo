@@ -6,7 +6,33 @@
  * POST → actions CRUD (add, toggle, update, delete, clear_done, reorder)
  */
 
-require_once __DIR__ . '/bootstrap.php';
+if (is_readable(__DIR__ . '/bootstrap.php')) {
+    require_once __DIR__ . '/bootstrap.php';
+} elseif (!function_exists('xteink_config')) {
+    function xteink_config(): array {
+        $defaults = ['base_url' => '', 'api_token' => ''];
+        $path = __DIR__ . '/config.php';
+        if (!is_readable($path)) {
+            return $defaults;
+        }
+        $loaded = require $path;
+        return array_merge($defaults, is_array($loaded) ? $loaded : []);
+    }
+    function xteink_request_token(): string {
+        $header = $_SERVER['HTTP_X_API_TOKEN'] ?? '';
+        return $header !== '' ? (string)$header : (string)($_GET['token'] ?? '');
+    }
+    function xteink_require_auth(): void {
+        $expected = (string)(xteink_config()['api_token'] ?? '');
+        if ($expected === '' || hash_equals($expected, xteink_request_token())) {
+            return;
+        }
+        http_response_code(401);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Unauthorized'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
 
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
@@ -133,12 +159,12 @@ switch ($action) {
         if (count($data['todos']) >= MAX_TODOS) {
             respond(['error' => 'Limit of ' . MAX_TODOS . ' todos reached'], 400);
         }
-        $data['todos'][] = [
+        array_unshift($data['todos'], [
             'id' => newId(),
             'text' => $text,
             'done' => false,
             'created_at' => date('c'),
-        ];
+        ]);
         saveTodos($data);
         respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
 
@@ -179,7 +205,9 @@ switch ($action) {
     case 'clear_done':
         $data['todos'] = array_values(array_filter(
             $data['todos'],
-            static fn($todo) => empty($todo['done'])
+            static function ($todo) {
+                return empty($todo['done']);
+            }
         ));
         saveTodos($data);
         respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);

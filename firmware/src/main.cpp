@@ -44,6 +44,12 @@ const uint64_t SLEEP_DURATION_US = 600ULL * 1000000ULL;  // 10 minutes
 const unsigned long AUTO_SLEEP_DELAY = 300000;           // 5 minutes
 const unsigned long MIN_REFRESH_INTERVAL = 2000;
 
+// POWER (GPIO3) + ADC ladders (GPIO1/2) : réveil boutons depuis le deep sleep
+const uint64_t BUTTON_WAKE_MASK =
+    (1ULL << InputManager::POWER_BUTTON_PIN) |
+    (1ULL << InputManager::BUTTON_ADC_PIN_1) |
+    (1ULL << InputManager::BUTTON_ADC_PIN_2);
+
 const char* NTP_SERVER = "pool.ntp.org";
 const long GMT_OFFSET = 3600;       // UTC+1
 const int DAYLIGHT_OFFSET = 3600;   // +1h été
@@ -81,7 +87,7 @@ bool apiOk = false;
 String lastFetchTime = "--:--";
 unsigned long lastDisplayUpdate = 0;
 unsigned long lastActivity = 0;
-RTC_DATA_ATTR bool wokeFromTimer = false;
+bool wokeFromTimer = false;
 
 struct TodoItem {
     char text[MAX_TODO_TEXT];
@@ -131,8 +137,48 @@ void showMessage(const char* line1, const char* line2 = nullptr, const char* lin
     } while (display.nextPage());
 }
 
+void waitPowerButtonRelease() {
+    unsigned long start = millis();
+    while (digitalRead(InputManager::POWER_BUTTON_PIN) == LOW) {
+        if (millis() - start > 4000) break;
+        delay(10);
+    }
+    inputMgr.update();
+    inputMgr.update();
+}
+
+bool connectWifi() {
+    Serial.print("Connexion WiFi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        Serial.print(".");
+        attempts++;
+    }
+
+    wifiConnected = (WiFi.status() == WL_CONNECTED);
+    if (wifiConnected) {
+        Serial.println(" OK!");
+        Serial.println(WiFi.localIP());
+        configTime(GMT_OFFSET, DAYLIGHT_OFFSET, NTP_SERVER);
+        delay(1500);
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo, 1000)) {
+            char timeStr[6];
+            strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+            lastFetchTime = String(timeStr);
+        }
+    } else {
+        Serial.println(" ECHEC");
+    }
+    return wifiConnected;
+}
+
 void goToSleep() {
-    Serial.println("Mise en veille...");
+    Serial.println("Mise en veille (deep sleep)...");
 
     int bottomY = DISPLAY_HEIGHT - 30;
     display.setPartialWindow(400, bottomY - 20, 70, 30);
@@ -145,30 +191,20 @@ void goToSleep() {
         display.print("ZZ");
     } while (display.nextPage());
 
-    Serial.flush();
+    display.hibernate();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
+    Serial.flush();
 
-    unsigned long sleepStart = millis();
-    unsigned long sleepDuration = SLEEP_DURATION_US / 1000;
+    pinMode(InputManager::POWER_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(InputManager::BUTTON_ADC_PIN_1, INPUT);
+    pinMode(InputManager::BUTTON_ADC_PIN_2, INPUT);
 
-    while (millis() - sleepStart < sleepDuration) {
-        inputMgr.update();
-        if (inputMgr.wasPressed(InputManager::BTN_BACK) ||
-            inputMgr.wasPressed(InputManager::BTN_LEFT) ||
-            inputMgr.wasPressed(InputManager::BTN_RIGHT) ||
-            inputMgr.wasPressed(InputManager::BTN_CONFIRM) ||
-            inputMgr.wasPressed(InputManager::BTN_POWER)) {
-            Serial.println("Reveil par bouton");
-            wokeFromTimer = false;
-            esp_restart();
-        }
-        delay(100);
+    esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
+    if (esp_deep_sleep_enable_gpio_wakeup(BUTTON_WAKE_MASK, ESP_GPIO_WAKEUP_GPIO_LOW) != ESP_OK) {
+        esp_deep_sleep_enable_gpio_wakeup(1ULL << InputManager::POWER_BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
     }
-
-    Serial.println("Reveil par timer");
-    wokeFromTimer = true;
-    esp_restart();
+    esp_deep_sleep_start();
 }
 
 // ============================================================================
@@ -417,50 +453,29 @@ void setup() {
     u8g2.begin(display);
     inputMgr.begin();
 
-    Serial.print("Connexion WiFi...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
+    if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
+        waitPowerButtonRelease();
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println(" OK!");
-        Serial.println(WiFi.localIP());
-        wifiConnected = true;
-
-        configTime(GMT_OFFSET, DAYLIGHT_OFFSET, NTP_SERVER);
-        delay(2000);
-
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo)) {
-            char timeStr[6];
-            strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-            lastFetchTime = String(timeStr);
-        }
-    } else {
-        Serial.println(" ECHEC");
-        wifiConnected = false;
-    }
-
-    batteryPercent = readBatteryPercent();
-
-    if (wifiConnected) {
-        if (fetchTodos()) {
+    bool fetched = false;
+    if (connectWifi()) {
+        fetched = fetchTodos();
+        if (fetched) {
             Serial.println("Todos charges!");
         }
     }
 
-    needsRedraw = true;
-    displayTodos(true);
+    batteryPercent = readBatteryPercent();
+
+    // Réveil timer : ne pas écraser l'écran si la synchro a échoué
+    if (fetched || !wokeFromTimer) {
+        needsRedraw = true;
+        displayTodos(true);
+    }
 
     if (wokeFromTimer) {
         Serial.println("Retour en veille...");
-        delay(100);
+        delay(50);
         goToSleep();
     }
 

@@ -3,7 +3,21 @@
  * XTeInk Todo UI
  * Business demo mode (screenshots): ?demo=1 — fake list, no API writes
  */
-require_once __DIR__ . '/bootstrap.php';
+if (is_readable(__DIR__ . '/bootstrap.php')) {
+    require_once __DIR__ . '/bootstrap.php';
+} elseif (!function_exists('xteink_config')) {
+    function xteink_config(): array {
+        $defaults = ['base_url' => '', 'api_token' => ''];
+        $path = __DIR__ . '/config.php';
+        if (!is_readable($path)) {
+            return $defaults;
+        }
+        $loaded = require $path;
+        return array_merge($defaults, is_array($loaded) ? $loaded : []);
+    }
+    function xteink_require_auth(): void {
+    }
+}
 $demoMode = isset($_GET['demo']);
 $apiToken = (string)(xteink_config()['api_token'] ?? '');
 ?>
@@ -634,7 +648,7 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             if (action === 'add') {
                 const text = String(payload.text || '').trim();
                 if (!text) throw new Error('Text required');
-                todos.push({
+                todos.unshift({
                     id: 'demo' + Date.now().toString(36),
                     text: text.slice(0, 120),
                     done: false,
@@ -674,6 +688,30 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
         function indexOfId(id) {
             return todos.findIndex(t => t.id === id);
+        }
+
+        function placeCaretFromClick(el, e) {
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            let range = null;
+            if (document.caretRangeFromPoint) {
+                range = document.caretRangeFromPoint(e.clientX, e.clientY);
+            } else if (document.caretPositionFromPoint) {
+                const pos = document.caretPositionFromPoint(e.clientX, e.clientY);
+                if (pos) {
+                    range = document.createRange();
+                    range.setStart(pos.offsetNode, pos.offset);
+                    range.collapse(true);
+                }
+            }
+            if (range && el.contains(range.startContainer)) {
+                sel.addRange(range);
+                return;
+            }
+            range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            sel.addRange(range);
         }
 
         /** Ordre d'affichage device : pending d'abord (comme le firmware) */
@@ -803,6 +841,7 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             const text = input.value.trim();
             if (!text) return;
             try {
+                previewPage = 0;
                 await mutate({ action: 'add', text });
                 input.value = '';
                 input.focus();
@@ -854,13 +893,10 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                     await moveTodo(id, idx + 1);
                 } else if (action === 'edit') {
                     const span = item.querySelector('.text');
+                    if (span.isContentEditable) return;
                     span.contentEditable = 'true';
                     span.focus();
-                    const range = document.createRange();
-                    range.selectNodeContents(span);
-                    const sel = window.getSelection();
-                    sel.removeAllRanges();
-                    sel.addRange(range);
+                    placeCaretFromClick(span, e);
 
                     const finish = async (save) => {
                         span.contentEditable = 'false';
