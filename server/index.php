@@ -189,6 +189,41 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             border-color: var(--accent);
             box-shadow: inset 0 0 0 1px var(--accent);
         }
+        .item.split-over-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+        .item.split-over-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
+        .today-split {
+            display: grid;
+            grid-template-columns: auto auto 1fr auto;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.2rem 0.4rem;
+            list-style: none;
+            cursor: grab;
+            user-select: none;
+        }
+
+        .today-split.dragging { opacity: 0.45; }
+        .today-split:active { cursor: grabbing; }
+
+        .today-split-label {
+            font-family: var(--mono);
+            font-size: 0.65rem;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .today-split-line {
+            height: 2px;
+            background: color-mix(in oklab, var(--accent) 70%, var(--line));
+            border-radius: 1px;
+        }
+
+        .today-split .actions { opacity: 0.45; }
+        .today-split:hover .actions,
+        .today-split:focus-within .actions { opacity: 1; }
 
         .grip {
             width: 1.5rem;
@@ -315,6 +350,13 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             font-size: 0.8em;
             color: var(--accent);
         }
+
+        .hint a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .hint a:hover { text-decoration: underline; }
 
         /* Preview desktop — masqué sur mobile */
         .preview-stage {
@@ -465,6 +507,24 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                 text-underline-offset: 0;
             }
 
+            .eink-item.today-end,
+            .eink-item.today-start {
+                position: relative;
+            }
+
+            .eink-item.today-end::after,
+            .eink-item.today-start::before {
+                content: "";
+                position: absolute;
+                left: 0;
+                right: 0;
+                height: 2px;
+                background: var(--eink-ink);
+            }
+
+            .eink-item.today-end::after { bottom: 0; }
+            .eink-item.today-start::before { top: 0; }
+
             .eink-empty {
                 font-family: var(--mono);
                 font-size: 6.5cqw;
@@ -551,7 +611,9 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
             <p class="hint">
                 Drag tasks with <strong>⋮⋮</strong> (or ↑ ↓) to reorder.
+                <br>Drag the <strong>today</strong> line (or ↑ ↓) — everything above is for today.
                 <br>The XTeInk fetches tasks on wake — press CONFIRM to force a refresh.
+                <br>Git: <a href="https://github.com/pocmaker42/xteink-todo" target="_blank" rel="noopener noreferrer">github.com/pocmaker42/xteink-todo</a>
             </p>
         </div>
 
@@ -598,7 +660,9 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         const nextPageBtn = document.getElementById('nextPage');
 
         let todos = [];
+        let todayCount = 0;
         let dragId = null;
+        let draggingSplit = false;
         let previewPage = 0;
 
         /** Fake business list — screenshots / demo only */
@@ -619,9 +683,21 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             statusEl.classList.toggle('error', isError);
         }
 
+        function clampTodayCount(n = todayCount) {
+            return Math.max(0, Math.min(todos.length, Number(n) || 0));
+        }
+
+        function applyTodosPayload(data) {
+            todos = data.todos || [];
+            todayCount = clampTodayCount(
+                data.today_count !== undefined ? data.today_count : todayCount
+            );
+        }
+
         function demoSnapshot() {
             return {
                 todos: todos.map(t => ({ ...t })),
+                today_count: clampTodayCount(),
                 updated_at: new Date().toISOString(),
             };
         }
@@ -654,6 +730,7 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                     done: false,
                     created_at: new Date().toISOString(),
                 });
+                todayCount = clampTodayCount(todayCount + 1);
             } else if (action === 'toggle') {
                 const t = todos.find(x => x.id === payload.id);
                 if (t) t.done = !t.done;
@@ -662,9 +739,16 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                 const text = String(payload.text || '').trim();
                 if (t && text) t.text = text.slice(0, 120);
             } else if (action === 'delete') {
+                const idx = todos.findIndex(x => x.id === payload.id);
                 todos = todos.filter(x => x.id !== payload.id);
+                if (idx >= 0 && idx < todayCount) todayCount -= 1;
+                todayCount = clampTodayCount();
             } else if (action === 'clear_done') {
+                const keptToday = todos.slice(0, todayCount).filter(x => !x.done).length;
                 todos = todos.filter(x => !x.done);
+                todayCount = keptToday;
+            } else if (action === 'set_today') {
+                todayCount = clampTodayCount(payload.count);
             } else if (action === 'reorder' && Array.isArray(payload.ids)) {
                 const byId = Object.fromEntries(todos.map(t => [t.id, t]));
                 const next = [];
@@ -714,9 +798,9 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             sel.addRange(range);
         }
 
-        /** Ordre d'affichage device : pending d'abord (comme le firmware) */
+        /** Même ordre que l'UI web (et le firmware) — le trait "today" reste aligné */
         function displayTodos() {
-            return [...todos].sort((a, b) => Number(a.done) - Number(b.done));
+            return todos;
         }
 
         function pageCount() {
@@ -754,12 +838,19 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             const pageItems = sorted.slice(start, start + TODOS_PER_PAGE);
             einkList.style.setProperty('--eink-count', String(pageItems.length));
             const checkMark = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 12 10 18 20 6"/></svg>`;
-            einkList.innerHTML = pageItems.map(todo => `
-                <li class="eink-item ${todo.done ? 'done' : ''}">
+            const split = clampTodayCount();
+            einkList.innerHTML = pageItems.map((todo, i) => {
+                const idx = start + i;
+                const classes = ['eink-item'];
+                if (todo.done) classes.push('done');
+                if (i === 0 && split === start) classes.push('today-start');
+                if (split === idx + 1) classes.push('today-end');
+                return `
+                <li class="${classes.join(' ')}">
                     <span class="eink-box">${todo.done ? checkMark : ''}</span>
                     <span class="eink-text">${escapeHtml(todo.text)}</span>
-                </li>
-            `).join('');
+                </li>`;
+            }).join('');
         }
 
         async function saveOrder() {
@@ -790,7 +881,8 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             if (!todos.length) {
                 listEl.innerHTML = `<li class="empty">No tasks yet.</li>`;
             } else {
-                listEl.innerHTML = todos.map((todo, i) => `
+                const split = clampTodayCount();
+                const rows = todos.map((todo, i) => `
                     <li class="item ${todo.done ? 'done' : ''}" data-id="${todo.id}" draggable="false">
                         <button class="grip" type="button" draggable="true" title="Drag to reorder" aria-label="Reorder">⋮⋮</button>
                         <button class="check" type="button" data-action="toggle" aria-label="Toggle">${checkSvg}</button>
@@ -801,7 +893,19 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                             <button class="icon-btn danger" type="button" data-action="delete" aria-label="Delete" title="Delete">✕</button>
                         </div>
                     </li>
-                `).join('');
+                `);
+                rows.splice(split, 0, `
+                    <li class="today-split" draggable="true" title="Drag to mark today's tasks">
+                        <button class="grip" type="button" draggable="true" aria-label="Move today line">⋮⋮</button>
+                        <span class="today-split-label">today</span>
+                        <span class="today-split-line" aria-hidden="true"></span>
+                        <div class="actions">
+                            <button class="icon-btn" type="button" data-action="split-up" aria-label="Move today line up" title="Move up" ${split === 0 ? 'disabled' : ''}>↑</button>
+                            <button class="icon-btn" type="button" data-action="split-down" aria-label="Move today line down" title="Move down" ${split === todos.length ? 'disabled' : ''}>↓</button>
+                        </div>
+                    </li>
+                `);
+                listEl.innerHTML = rows.join('');
             }
 
             renderPreview();
@@ -810,12 +914,13 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         async function refresh() {
             if (DEMO_MODE) {
                 todos = DEMO_TODOS.map(t => ({ ...t }));
+                todayCount = 3;
                 render();
                 setStatus('Demo mode — fake list (nothing is saved)');
                 return;
             }
             const data = await api();
-            todos = data.todos || [];
+            applyTodosPayload(data);
             render();
             if (data.updated_at) {
                 const d = new Date(data.updated_at);
@@ -826,7 +931,7 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         async function mutate(payload) {
             setStatus(DEMO_MODE ? 'Updating demo…' : 'Saving…');
             const data = await api(payload);
-            todos = data.todos || [];
+            applyTodosPayload(data);
             render();
             setStatus(
                 DEMO_MODE
@@ -873,7 +978,40 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
             }
         });
 
+        async function setTodayCount(n) {
+            n = clampTodayCount(n);
+            if (n === todayCount) return;
+            try {
+                await mutate({ action: 'set_today', count: n });
+            } catch (err) {
+                setStatus(err.message, true);
+                await refresh();
+            }
+        }
+
+        function splitDropIndex(e) {
+            const items = [...listEl.querySelectorAll('.item')];
+            for (let i = 0; i < items.length; i++) {
+                const rect = items[i].getBoundingClientRect();
+                if (e.clientY < rect.top + rect.height / 2) return i;
+            }
+            return items.length;
+        }
+
+        function clearSplitOver() {
+            listEl.querySelectorAll('.item').forEach(el => {
+                el.classList.remove('split-over-before', 'split-over-after');
+            });
+        }
+
         listEl.addEventListener('click', async (e) => {
+            const splitBtn = e.target.closest('.today-split [data-action]');
+            if (splitBtn && !splitBtn.disabled) {
+                const action = splitBtn.dataset.action;
+                if (action === 'split-up') await setTodayCount(todayCount - 1);
+                if (action === 'split-down') await setTodayCount(todayCount + 1);
+                return;
+            }
             const btn = e.target.closest('[data-action]');
             if (!btn || btn.disabled) return;
             const item = btn.closest('.item');
@@ -932,6 +1070,16 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         });
 
         listEl.addEventListener('dragstart', (e) => {
+            const split = e.target.closest('.today-split');
+            if (split) {
+                draggingSplit = true;
+                dragId = null;
+                split.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', 'today-split');
+                e.dataTransfer.setDragImage(split, 24, 12);
+                return;
+            }
             const grip = e.target.closest('.grip');
             if (!grip) {
                 e.preventDefault();
@@ -948,7 +1096,9 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
         listEl.addEventListener('dragend', () => {
             dragId = null;
-            listEl.querySelectorAll('.item').forEach(el => {
+            draggingSplit = false;
+            clearSplitOver();
+            listEl.querySelectorAll('.item, .today-split').forEach(el => {
                 el.classList.remove('dragging', 'drag-over');
             });
         });
@@ -956,6 +1106,17 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         listEl.addEventListener('dragover', (e) => {
             e.preventDefault();
             e.dataTransfer.dropEffect = 'move';
+            if (draggingSplit) {
+                clearSplitOver();
+                const next = splitDropIndex(e);
+                const items = listEl.querySelectorAll('.item');
+                if (next < items.length) {
+                    items[next].classList.add('split-over-before');
+                } else if (items.length) {
+                    items[items.length - 1].classList.add('split-over-after');
+                }
+                return;
+            }
             const over = e.target.closest('.item');
             listEl.querySelectorAll('.item').forEach(el => el.classList.remove('drag-over'));
             if (over && over.dataset.id !== dragId) {
@@ -965,10 +1126,18 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
         listEl.addEventListener('drop', async (e) => {
             e.preventDefault();
+            if (draggingSplit) {
+                const next = splitDropIndex(e);
+                clearSplitOver();
+                draggingSplit = false;
+                listEl.querySelectorAll('.today-split').forEach(el => el.classList.remove('dragging'));
+                await setTodayCount(next);
+                return;
+            }
             const over = e.target.closest('.item');
             const id = dragId || e.dataTransfer.getData('text/plain');
             listEl.querySelectorAll('.item').forEach(el => el.classList.remove('drag-over', 'dragging'));
-            if (!over || !id || over.dataset.id === id) return;
+            if (!over || !id || id === 'today-split' || over.dataset.id === id) return;
             await moveTodo(id, indexOfId(over.dataset.id));
         });
 

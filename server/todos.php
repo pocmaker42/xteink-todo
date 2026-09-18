@@ -3,7 +3,7 @@
  * XTeInk TODO List - API + stockage JSON
  *
  * GET  → liste des todos (pour le device et l'UI)
- * POST → actions CRUD (add, toggle, update, delete, clear_done, reorder)
+ * POST → actions CRUD (add, toggle, update, delete, clear_done, reorder, set_today)
  */
 
 if (is_readable(__DIR__ . '/bootstrap.php')) {
@@ -60,7 +60,41 @@ function respond(array $data, int $code = 200): void {
 }
 
 function emptyTodos(): array {
-    return ['todos' => [], 'updated_at' => null];
+    return ['todos' => [], 'updated_at' => null, 'today_count' => 0];
+}
+
+function clampTodayCount(array $data): int {
+    $max = count($data['todos'] ?? []);
+    if (!isset($data['today_count'])) {
+        return $max;
+    }
+    return max(0, min((int)$data['today_count'], $max));
+}
+
+function withTodayCount(array $data): array {
+    $data['today_count'] = clampTodayCount($data);
+    return $data;
+}
+
+function todosPublic(array $data, array $extra = []): array {
+    $data = withTodayCount($data);
+    $pending = 0;
+    foreach ($data['todos'] as $todo) {
+        if (empty($todo['done'])) {
+            $pending++;
+        }
+    }
+    return array_merge([
+        'todos' => $data['todos'],
+        'total' => count($data['todos']),
+        'pending' => $pending,
+        'today_count' => $data['today_count'],
+        'updated_at' => $data['updated_at'] ?? null,
+    ], $extra);
+}
+
+function respondTodos(array $data): void {
+    respond(todosPublic($data, ['ok' => true]));
 }
 
 function ensureTodosStorage(): void {
@@ -92,6 +126,7 @@ function loadTodos(): array {
 
 function saveTodos(array $data): void {
     ensureTodosStorage();
+    $data = withTodayCount($data);
     $data['updated_at'] = date('c');
     $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     if ($json === false || file_put_contents(TODOS_FILE, $json . "\n", LOCK_EX) === false) {
@@ -122,21 +157,10 @@ function newId(): string {
     return bin2hex(random_bytes(6));
 }
 
-$data = loadTodos();
+$data = withTodayCount(loadTodos());
 
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    $pending = 0;
-    foreach ($data['todos'] as $todo) {
-        if (empty($todo['done'])) {
-            $pending++;
-        }
-    }
-    respond([
-        'todos' => $data['todos'],
-        'total' => count($data['todos']),
-        'pending' => $pending,
-        'updated_at' => $data['updated_at'],
-    ]);
+    respond(todosPublic($data));
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -165,8 +189,9 @@ switch ($action) {
             'done' => false,
             'created_at' => date('c'),
         ]);
+        $data['today_count'] = clampTodayCount($data) + 1;
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
 
     case 'toggle':
         $id = (string)($input['id'] ?? '');
@@ -176,7 +201,7 @@ switch ($action) {
         }
         $data['todos'][$idx]['done'] = empty($data['todos'][$idx]['done']);
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
 
     case 'update':
         $id = (string)($input['id'] ?? '');
@@ -190,7 +215,7 @@ switch ($action) {
         }
         $data['todos'][$idx]['text'] = $text;
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
 
     case 'delete':
         $id = (string)($input['id'] ?? '');
@@ -198,19 +223,29 @@ switch ($action) {
         if ($idx < 0) {
             respond(['error' => 'Todo not found'], 404);
         }
+        $today = clampTodayCount($data);
         array_splice($data['todos'], $idx, 1);
+        $data['today_count'] = $idx < $today ? $today - 1 : $today;
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
 
     case 'clear_done':
+        $today = clampTodayCount($data);
+        $keptToday = 0;
+        foreach (array_slice($data['todos'], 0, $today) as $todo) {
+            if (empty($todo['done'])) {
+                $keptToday++;
+            }
+        }
         $data['todos'] = array_values(array_filter(
             $data['todos'],
             static function ($todo) {
                 return empty($todo['done']);
             }
         ));
+        $data['today_count'] = $keptToday;
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
 
     case 'reorder':
         $ids = $input['ids'] ?? null;
@@ -235,7 +270,12 @@ switch ($action) {
         }
         $data['todos'] = $reordered;
         saveTodos($data);
-        respond(['ok' => true, 'todos' => $data['todos'], 'updated_at' => $data['updated_at']]);
+        respondTodos($data);
+
+    case 'set_today':
+        $data['today_count'] = max(0, min((int)($input['count'] ?? 0), count($data['todos'])));
+        saveTodos($data);
+        respondTodos($data);
 
     default:
         respond(['error' => 'Unknown action'], 400);

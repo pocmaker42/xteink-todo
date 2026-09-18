@@ -20,9 +20,9 @@
 #include <Fonts/FreeMonoBold18pt7b.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <InputManager.h>
-#include "esp_sleep.h"
 
 #include "secrets.h"
+#include "esp_wifi.h"
 
 // ============================================================================
 // CONFIGURATION
@@ -40,15 +40,9 @@
 #define TODO_LIST_BOTTOM 740
 #define TODO_TEXT_MAX_WIDTH 370
 
-const uint64_t SLEEP_DURATION_US = 600ULL * 1000000ULL;  // 10 minutes
-const unsigned long AUTO_SLEEP_DELAY = 300000;           // 5 minutes
+const unsigned long REBOOT_EVERY_MS = 300000;    // 5 min : reboot + synchro, quoi qu'il arrive
 const unsigned long MIN_REFRESH_INTERVAL = 2000;
-
-// POWER (GPIO3) + ADC ladders (GPIO1/2) : réveil boutons depuis le deep sleep
-const uint64_t BUTTON_WAKE_MASK =
-    (1ULL << InputManager::POWER_BUTTON_PIN) |
-    (1ULL << InputManager::BUTTON_ADC_PIN_1) |
-    (1ULL << InputManager::BUTTON_ADC_PIN_2);
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 12000;
 
 const char* NTP_SERVER = "pool.ntp.org";
 const long GMT_OFFSET = 3600;       // UTC+1
@@ -86,7 +80,6 @@ bool wifiConnected = false;
 bool apiOk = false;
 String lastFetchTime = "--:--";
 unsigned long lastDisplayUpdate = 0;
-unsigned long lastActivity = 0;
 bool wokeFromTimer = false;
 
 struct TodoItem {
@@ -96,6 +89,7 @@ struct TodoItem {
 TodoItem todos[MAX_TODOS];
 int todoCount = 0;
 int todoPending = 0;
+int todayCount = 0;
 int todoPage = 0;
 bool todosValid = false;
 
@@ -114,6 +108,19 @@ void applyApiAuth(HTTPClient& http) {
     if (API_TOKEN[0] != '\0') {
         http.addHeader("X-Api-Token", API_TOKEN);
     }
+}
+
+bool fetchTodos();
+bool syncTodos();
+void displayTodos(bool force = false);
+
+void feedWdt(const void*) {
+    yield();
+}
+
+void autoRebootTask(void*) {
+    vTaskDelay(pdMS_TO_TICKS(REBOOT_EVERY_MS));
+    ESP.restart();
 }
 
 void showMessage(const char* line1, const char* line2 = nullptr, const char* line3 = nullptr) {
@@ -147,64 +154,82 @@ void waitPowerButtonRelease() {
     inputMgr.update();
 }
 
-bool connectWifi() {
-    Serial.print("Connexion WiFi...");
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-
-    wifiConnected = (WiFi.status() == WL_CONNECTED);
-    if (wifiConnected) {
-        Serial.println(" OK!");
-        Serial.println(WiFi.localIP());
-        configTime(GMT_OFFSET, DAYLIGHT_OFFSET, NTP_SERVER);
-        delay(1500);
-        struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 1000)) {
-            char timeStr[6];
-            strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
-            lastFetchTime = String(timeStr);
-        }
-    } else {
-        Serial.println(" ECHEC");
-    }
-    return wifiConnected;
+bool runSync(bool automatic) {
+    wokeFromTimer = automatic;
+    batteryPercent = readBatteryPercent();
+    bool fetched = syncTodos();
+    displayTodos(true);
+    return fetched;
 }
 
-void goToSleep() {
-    Serial.println("Mise en veille (deep sleep)...");
-
-    int bottomY = DISPLAY_HEIGHT - 30;
-    display.setPartialWindow(400, bottomY - 20, 70, 30);
-    display.firstPage();
-    do {
-        display.fillScreen(GxEPD_WHITE);
-        display.setTextColor(GxEPD_BLACK);
-        display.setFont(&FreeMonoBold9pt7b);
-        display.setCursor(405, bottomY);
-        display.print("ZZ");
-    } while (display.nextPage());
-
-    display.hibernate();
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    Serial.flush();
-
-    pinMode(InputManager::POWER_BUTTON_PIN, INPUT_PULLUP);
-    pinMode(InputManager::BUTTON_ADC_PIN_1, INPUT);
-    pinMode(InputManager::BUTTON_ADC_PIN_2, INPUT);
-
-    esp_sleep_enable_timer_wakeup(SLEEP_DURATION_US);
-    if (esp_deep_sleep_enable_gpio_wakeup(BUTTON_WAKE_MASK, ESP_GPIO_WAKEUP_GPIO_LOW) != ESP_OK) {
-        esp_deep_sleep_enable_gpio_wakeup(1ULL << InputManager::POWER_BUTTON_PIN, ESP_GPIO_WAKEUP_GPIO_LOW);
+void syncNtpClock() {
+    configTime(GMT_OFFSET, DAYLIGHT_OFFSET, NTP_SERVER);
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 3000)) {
+        char timeStr[6];
+        strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
+        lastFetchTime = String(timeStr);
     }
-    esp_deep_sleep_start();
+}
+
+bool connectWifi() {
+    if (WiFi.status() == WL_CONNECTED) {
+        wifiConnected = true;
+        return true;
+    }
+
+    Serial.print("Connexion WiFi...");
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);
+
+    for (int round = 0; round < 3; round++) {
+        if (round > 0) {
+            Serial.print(" retry");
+            WiFi.disconnect(true);
+            delay(100);
+        }
+
+        WiFi.mode(WIFI_STA);
+        WiFi.setSleep(false);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+        unsigned long start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
+            delay(250);
+            Serial.print(".");
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.println(" OK!");
+            Serial.println(WiFi.localIP());
+            wifiConnected = true;
+            esp_wifi_set_ps(WIFI_PS_NONE);
+            WiFi.setSleep(false);
+            syncNtpClock();
+            return true;
+        }
+    }
+
+    Serial.println("ECHEC");
+    wifiConnected = false;
+    return false;
+}
+
+bool syncTodos() {
+    if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
+        return false;
+    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (fetchTodos()) {
+            return true;
+        }
+        delay(400);
+        if (WiFi.status() != WL_CONNECTED && !connectWifi()) {
+            return false;
+        }
+    }
+    return false;
 }
 
 // ============================================================================
@@ -222,17 +247,20 @@ bool fetchTodos() {
 
     WiFiClientSecure client;
     client.setInsecure();
+    client.setTimeout(8000);
+    client.setHandshakeTimeout(8);
 
     HTTPClient http;
+    http.setConnectTimeout(8000);
+    http.setTimeout(8000);
     http.begin(client, API_TODOS);
-    http.setTimeout(15000);
     applyApiAuth(http);
 
     int httpCode = http.GET();
 
     if (httpCode == HTTP_CODE_OK) {
         String payload = http.getString();
-        Serial.println(payload);
+        Serial.printf("HTTP 200, %d bytes\n", payload.length());
 
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
@@ -259,22 +287,15 @@ bool fetchTodos() {
                 todoCount++;
             }
 
-            for (int i = 0; i < todoCount - 1; i++) {
-                for (int j = i + 1; j < todoCount; j++) {
-                    if (todos[i].done && !todos[j].done) {
-                        TodoItem tmp = todos[i];
-                        todos[i] = todos[j];
-                        todos[j] = tmp;
-                    }
-                }
-            }
+            todayCount = doc["today_count"].is<int>() ? doc["today_count"].as<int>() : todoCount;
+            if (todayCount < 0) todayCount = 0;
+            if (todayCount > todoCount) todayCount = todoCount;
 
-            todoPage = 0;
             todosValid = true;
             apiOk = true;
 
             struct tm timeinfo;
-            if (getLocalTime(&timeinfo)) {
+            if (getLocalTime(&timeinfo, 200)) {
                 char timeStr[6];
                 strftime(timeStr, sizeof(timeStr), "%H:%M", &timeinfo);
                 lastFetchTime = String(timeStr);
@@ -289,7 +310,6 @@ bool fetchTodos() {
     }
 
     apiOk = false;
-    todosValid = false;
     http.end();
     return false;
 }
@@ -298,7 +318,12 @@ bool fetchTodos() {
 // DISPLAY
 // ============================================================================
 
-void displayTodos(bool force = false) {
+void drawTodayLine(int y) {
+    display.drawFastHLine(30, y - 1, DISPLAY_WIDTH - 60, GxEPD_BLACK);
+    display.drawFastHLine(30, y + 1, DISPLAY_WIDTH - 60, GxEPD_BLACK);
+}
+
+void displayTodos(bool force) {
     if (!needsRedraw && !force) return;
 
     unsigned long now = millis();
@@ -366,6 +391,11 @@ void displayTodos(bool force = false) {
             u8g2.setFontMode(1);
             u8g2.setForegroundColor(GxEPD_BLACK);
 
+            if (todayCount == start) {
+                int firstBoxTop = y - (boxSize * 3) / 4;
+                drawTodayLine((TODO_LIST_TOP + firstBoxTop) / 2);
+            }
+
             for (int i = 0; i < onPage; i++) {
                 int idx = start + i;
 
@@ -398,6 +428,10 @@ void displayTodos(bool force = false) {
                     display.drawFastHLine(70, y - 7, max(w, 40), GxEPD_BLACK);
                 }
 
+                if (start + i + 1 == todayCount) {
+                    // Milieu du vide entre le bas de cette case et le haut de la suivante
+                    drawTodayLine(y + rowH / 2 - boxSize / 4);
+                }
                 y += rowH;
             }
         }
@@ -430,106 +464,56 @@ void displayTodos(bool force = false) {
 // ============================================================================
 
 void setup() {
+    disableLoopWDT();
     Serial.begin(115200);
-    delay(500);
+    Serial.setTxTimeoutMs(0);
+
+    // Watchdog indépendant : reboot + synchro même si WiFi/HTTP/écran sont bloqués
+    xTaskCreate(autoRebootTask, "reboot", 2048, NULL, 1, NULL);
+
+    delay(200);
     Serial.println("\n\nXTeInk Todo List");
     Serial.println("================");
 
-    esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-    wokeFromTimer = (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER);
-
-    if (wokeFromTimer) {
-        Serial.println("Reveil par timer");
-    } else if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
-        Serial.println("Reveil par bouton");
-    } else {
-        Serial.println("Boot normal");
-    }
-
     SPI.begin(EPD_SCLK, -1, EPD_MOSI, EPD_CS);
-    display.init(115200);
+    display.init(0, true, 2, false);
+    display.epd2.setBusyCallback(feedWdt);
     display.setRotation(3);
     display.setTextWrap(false);
     u8g2.begin(display);
     inputMgr.begin();
 
-    if (wakeup_reason == ESP_SLEEP_WAKEUP_GPIO) {
-        waitPowerButtonRelease();
-    }
-
-    bool fetched = false;
-    if (connectWifi()) {
-        fetched = fetchTodos();
-        if (fetched) {
-            Serial.println("Todos charges!");
-        }
-    }
-
-    batteryPercent = readBatteryPercent();
-
-    // Réveil timer : ne pas écraser l'écran si la synchro a échoué
-    if (fetched || !wokeFromTimer) {
-        needsRedraw = true;
-        displayTodos(true);
-    }
-
-    if (wokeFromTimer) {
-        Serial.println("Retour en veille...");
-        delay(50);
-        goToSleep();
-    }
-
-    lastActivity = millis();
-    Serial.println("Mode interactif");
+    runSync(true);
+    Serial.println("Toujours allume — reboot/synchro toutes les 5 min");
 }
 
 void loop() {
     inputMgr.update();
-    bool buttonPressed = false;
 
     if (inputMgr.wasPressed(InputManager::BTN_BACK) && todoPage > 0) {
         todoPage = 0;
-        needsRedraw = true;
-        Serial.println("BACK: premiere page");
-        buttonPressed = true;
+        displayTodos(true);
     }
 
     int pageCount = todoCount > 0 ? ((todoCount + TODOS_PER_PAGE - 1) / TODOS_PER_PAGE) : 1;
     if (inputMgr.wasPressed(InputManager::BTN_LEFT) && todoPage > 0) {
         todoPage--;
-        needsRedraw = true;
-        Serial.printf("LEFT: page %d\n", todoPage);
-        buttonPressed = true;
+        displayTodos(true);
     }
     if (inputMgr.wasPressed(InputManager::BTN_RIGHT) && todoPage < pageCount - 1) {
         todoPage++;
-        needsRedraw = true;
-        Serial.printf("RIGHT: page %d\n", todoPage);
-        buttonPressed = true;
+        displayTodos(true);
     }
 
     if (inputMgr.wasPressed(InputManager::BTN_CONFIRM)) {
-        Serial.println("CONFIRM: fetch manuel");
         showMessage("Loading...", "", "");
-        fetchTodos();
-        displayTodos(true);
-        buttonPressed = true;
+        runSync(false);
     }
 
     if (inputMgr.wasPressed(InputManager::BTN_POWER)) {
-        Serial.println("POWER: veille immediate");
-        goToSleep();
+        waitPowerButtonRelease();
+        ESP.restart();
     }
 
-    if (buttonPressed) {
-        lastActivity = millis();
-    }
-
-    if (millis() - lastActivity > AUTO_SLEEP_DELAY) {
-        Serial.println("Auto-sleep (inactivite)");
-        goToSleep();
-    }
-
-    displayTodos();
     delay(50);
 }
