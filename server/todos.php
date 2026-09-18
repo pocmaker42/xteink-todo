@@ -269,6 +269,9 @@ switch ($action) {
             $reordered[] = $todo;
         }
         $data['todos'] = $reordered;
+        if (array_key_exists('today_count', $input)) {
+            $data['today_count'] = (int)$input['today_count'];
+        }
         saveTodos($data);
         respondTodos($data);
 

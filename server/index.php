@@ -205,6 +205,11 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
         .today-split.dragging { opacity: 0.45; }
         .today-split:active { cursor: grabbing; }
+        .today-split.drag-over .today-split-line {
+            height: 3px;
+            background: var(--accent);
+            box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent) 28%, transparent);
+        }
 
         .today-split-label {
             font-family: var(--mono);
@@ -611,7 +616,7 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
 
             <p class="hint">
                 Drag tasks with <strong>⋮⋮</strong> (or ↑ ↓) to reorder.
-                <br>Drag the <strong>today</strong> line (or ↑ ↓) — everything above is for today.
+                <br>Drop a task on the <strong>today</strong> line to add it just above — or drag the line (↑ ↓).
                 <br>The XTeInk fetches tasks on wake — press CONFIRM to force a refresh.
                 <br>Git: <a href="https://github.com/pocmaker42/xteink-todo" target="_blank" rel="noopener noreferrer">github.com/pocmaker42/xteink-todo</a>
             </p>
@@ -759,6 +764,9 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                     }
                 }
                 todos = next.concat(Object.values(byId));
+                if (payload.today_count !== undefined) {
+                    todayCount = clampTodayCount(payload.today_count);
+                }
             }
         }
 
@@ -854,16 +862,43 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
         }
 
         async function saveOrder() {
-            await mutate({ action: 'reorder', ids: todos.map(t => t.id) });
+            await mutate({
+                action: 'reorder',
+                ids: todos.map(t => t.id),
+                today_count: clampTodayCount(),
+            });
         }
 
-        async function moveTodo(id, toIndex) {
+        /** Les autres tâches gardent leur côté du trait today. dest: index, 'today' ou 'later'. */
+        async function moveTodo(id, dest) {
             const from = indexOfId(id);
             if (from < 0) return;
-            const clamped = Math.max(0, Math.min(todos.length - 1, toIndex));
-            if (from === clamped) return;
+
+            const ontoToday = dest === 'today';
+            const ontoLater = dest === 'later';
+            const toIndex = ontoToday || ontoLater ? todayCount : dest;
+            const wasToday = from < todayCount;
+            const becomesToday = ontoToday || (!ontoLater && toIndex < todayCount);
+
+            if (!ontoToday && !ontoLater && from === toIndex) return;
+            if (ontoToday && wasToday && from === todayCount - 1) return;
+            if (ontoLater && !wasToday && from === todayCount) return;
+
+            let split = todayCount;
             const [item] = todos.splice(from, 1);
-            todos.splice(clamped, 0, item);
+            if (wasToday) split -= 1;
+
+            let insertAt;
+            if (ontoToday || ontoLater) {
+                insertAt = split;
+            } else {
+                insertAt = toIndex;
+                if (from < toIndex) insertAt -= 1;
+            }
+            insertAt = Math.max(0, Math.min(todos.length, insertAt));
+            todos.splice(insertAt, 0, item);
+            todayCount = clampTodayCount(becomesToday ? split + 1 : split);
+
             render();
             try {
                 await saveOrder();
@@ -1026,9 +1061,11 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                 } else if (action === 'delete') {
                     await mutate({ action: 'delete', id });
                 } else if (action === 'up') {
-                    await moveTodo(id, idx - 1);
+                    if (idx === todayCount) await moveTodo(id, 'today');
+                    else await moveTodo(id, idx - 1);
                 } else if (action === 'down') {
-                    await moveTodo(id, idx + 1);
+                    if (idx === todayCount - 1) await moveTodo(id, 'later');
+                    else await moveTodo(id, idx + 1);
                 } else if (action === 'edit') {
                     const span = item.querySelector('.text');
                     if (span.isContentEditable) return;
@@ -1117,8 +1154,13 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                 }
                 return;
             }
+            listEl.querySelectorAll('.item, .today-split').forEach(el => el.classList.remove('drag-over'));
+            const splitOver = e.target.closest('.today-split');
+            if (splitOver && dragId) {
+                splitOver.classList.add('drag-over');
+                return;
+            }
             const over = e.target.closest('.item');
-            listEl.querySelectorAll('.item').forEach(el => el.classList.remove('drag-over'));
             if (over && over.dataset.id !== dragId) {
                 over.classList.add('drag-over');
             }
@@ -1134,10 +1176,17 @@ $apiToken = (string)(xteink_config()['api_token'] ?? '');
                 await setTodayCount(next);
                 return;
             }
-            const over = e.target.closest('.item');
             const id = dragId || e.dataTransfer.getData('text/plain');
-            listEl.querySelectorAll('.item').forEach(el => el.classList.remove('drag-over', 'dragging'));
-            if (!over || !id || id === 'today-split' || over.dataset.id === id) return;
+            listEl.querySelectorAll('.item, .today-split').forEach(el => {
+                el.classList.remove('drag-over', 'dragging');
+            });
+            if (!id || id === 'today-split') return;
+            if (e.target.closest('.today-split')) {
+                await moveTodo(id, 'today');
+                return;
+            }
+            const over = e.target.closest('.item');
+            if (!over || over.dataset.id === id) return;
             await moveTodo(id, indexOfId(over.dataset.id));
         });
 
